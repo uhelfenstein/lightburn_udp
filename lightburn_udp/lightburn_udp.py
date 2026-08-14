@@ -20,13 +20,15 @@ import stat
 import string
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 
 # Single source of truth for the version. pyproject.toml reads this attribute,
 # and __init__.py re-exports it, so a release is a one-line change here.
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Urs Helfenstein"
-__all__ = ["LightBurnUDPCommunication", "find_lightburn"]
+__all__ = ["LightBurnUDPCommunication", "find_lightburn", "PortInUseError"]
 
 _IS_WINDOWS = os.name == "nt"
 _IS_MACOS = sys.platform == "darwin"
@@ -77,6 +79,27 @@ def _linux_candidates():
     )
 
 
+#: An extracted AppImage is a directory whose entry point is a shell stub named
+#: AppRun; the real binary sits at usr/bin/LightBurn and is only reached via
+#: exec. Searching for a file called "LightBurn" therefore misses these trees
+#: entirely, which is why an explicit path used to be mandatory.
+_APPDIR_ENTRY = "AppRun"
+
+
+def _appdir_entry(path):
+    """
+    If path is an extracted-AppImage directory, return its AppRun stub.
+
+    Returns:
+        str or None: Absolute path to the AppRun, or None if this is not an
+        extracted AppImage directory.
+    """
+    if not os.path.isdir(path):
+        return None
+    entry = os.path.join(path, _APPDIR_ENTRY)
+    return entry if _runnable(entry) else None
+
+
 _GLOBS = {
     "linux": (
         "/opt/LightBurn*/LightBurn*",
@@ -84,6 +107,14 @@ _GLOBS = {
         "~/Applications/LightBurn*/LightBurn*",
         "~/.local/bin/LightBurn*.AppImage",
         "~/Downloads/LightBurn*.AppImage",
+        # Extracted AppImages, by their AppRun entry point. Kept last so a real
+        # binary always wins if both are present.
+        "/opt/LightBurn*/AppRun",
+        "~/Applications/LightBurn*/AppRun",
+        "~/Programme/LightBurn*/AppRun",
+        "~/Programs/LightBurn*/AppRun",
+        "~/Downloads/LightBurn*/AppRun",
+        "~/LightBurn*/AppRun",
     ),
     "darwin": ("/Applications/LightBurn*.app/Contents/MacOS/LightBurn",),
     "win32": (),
@@ -124,14 +155,31 @@ def find_lightburn():
         candidate = _expand(candidate)
         if _runnable(candidate):
             return candidate
+        entry = _appdir_entry(candidate)
+        if entry:
+            return entry
 
     key = "win32" if _IS_WINDOWS else ("darwin" if _IS_MACOS else "linux")
     for pattern in _GLOBS[key]:
         for candidate in sorted(glob.glob(_expand(pattern))):
             if _runnable(candidate):
                 return candidate
+            entry = _appdir_entry(candidate)
+            if entry:
+                return entry
 
     return None
+
+
+class PortInUseError(OSError):
+    """
+    The receive port could not be bound because something else holds it.
+
+    A distinct type because it means something categorically different from a
+    timeout: the message never left, so retrying or waiting longer cannot help.
+    Previously this surfaced as a plain False, indistinguishable from "LightBurn
+    did not answer", which sent debugging down the wrong path.
+    """
 
 
 def _port_check_hint(port):
@@ -196,6 +244,14 @@ class LightBurnUDPCommunication:
             udp_ip if _is_loopback(udp_ip) else "0.0.0.0"
         )
         self._in_sock = None
+        # One socket is shared by every command, and each command drains it
+        # first. Two threads overlapping would let one discard the other's
+        # reply, so commands are serialised. Reentrant because
+        # ensure_lightburn_running calls ping() while already holding nothing,
+        # but callers may reasonably wrap their own sequences in the same lock.
+        self._lock = threading.RLock()
+        #: Path of the log file the last start_lightburn() redirected output to.
+        self.launch_log_path = None
 
     # ------------------------------------------------------------------ #
     # Executable handling
@@ -230,6 +286,13 @@ class LightBurnUDPCommunication:
             inner = os.path.join(path, "Contents", "MacOS", "LightBurn")
             if os.path.isfile(inner):
                 path = inner
+
+        # Likewise an extracted AppImage on Linux: accept the directory and
+        # resolve to its AppRun stub.
+        if not _IS_WINDOWS and os.path.isdir(path):
+            entry = _appdir_entry(path)
+            if entry:
+                path = entry
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"LightBurn executable not found at: {path}")
@@ -276,27 +339,34 @@ class LightBurnUDPCommunication:
             return self._in_sock
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # On Windows SO_REUSEADDR allows two sockets to genuinely share a port,
-        # which would let a second instance silently steal our replies. Use
-        # SO_EXCLUSIVEADDRUSE there instead; POSIX needs SO_REUSEADDR to avoid
-        # spurious EADDRINUSE.
-        try:
-            if _IS_WINDOWS:
+        # This port must be held exclusively. SO_REUSEADDR is habit carried over
+        # from TCP, where it only sidesteps TIME_WAIT; UDP has no TIME_WAIT, so
+        # it buys nothing here and does real damage: on Linux two datagram
+        # sockets with SO_REUSEADDR may both bind the same address, and the
+        # kernel then delivers each datagram to exactly one of them — the one
+        # bound most recently. The older instance goes deaf while every
+        # diagnostic still looks healthy, since the port is bound and LightBurn
+        # is replying, just to somebody else. Binding without it turns that
+        # silent theft back into an immediate, honest PortInUseError.
+        #
+        # On Windows SO_REUSEADDR is worse still (it lets sockets genuinely
+        # share a port), so ask for exclusivity explicitly there.
+        if _IS_WINDOWS:
+            try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-            else:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        except (AttributeError, OSError):
-            pass
+            except (AttributeError, OSError):
+                pass
 
         try:
             sock.bind((self.bind_ip, self.udp_in_port))
         except OSError as exc:
             sock.close()
             if exc.errno in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", None)):
-                raise OSError(
+                raise PortInUseError(
                     f"UDP port {self.udp_in_port} on {self.bind_ip} is already in "
-                    f"use. Another script or LightBurn instance is likely holding "
-                    f"it. Check with: {_port_check_hint(self.udp_in_port)}"
+                    f"use. Another script or a previous instance of this object "
+                    f"is likely holding it — call close() on the old one. "
+                    f"Check with: {_port_check_hint(self.udp_in_port)}"
                 ) from exc
             raise
 
@@ -327,38 +397,49 @@ class LightBurnUDPCommunication:
 
         Returns:
             str or False: The response text, or False on timeout or error.
+
+        Raises:
+            PortInUseError: If the receive port is held by something else. This
+                is deliberately not swallowed into a False: no message was ever
+                sent, so it is a configuration problem, not a silent laser that
+                needs waiting out.
         """
         out_sock = None
-        try:
-            in_sock = self._get_in_socket()
-            self._drain(in_sock)
+        with self._lock:
+            try:
+                in_sock = self._get_in_socket()
+                self._drain(in_sock)
 
-            out_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            out_sock.sendto(message.encode("utf-8"), (self.udp_ip, self.udp_out_port))
+                out_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                out_sock.sendto(
+                    message.encode("utf-8"), (self.udp_ip, self.udp_out_port)
+                )
 
-            deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                in_sock.settimeout(remaining)
-                try:
-                    data, addr = in_sock.recvfrom(65535)
-                except (socket.timeout, TimeoutError):
-                    return False
+                deadline = time.monotonic() + timeout
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    in_sock.settimeout(remaining)
+                    try:
+                        data, addr = in_sock.recvfrom(65535)
+                    except (socket.timeout, TimeoutError):
+                        return False
 
-                # Ignore anything that did not come from the LightBurn host.
-                if self.udp_ip not in ("0.0.0.0", "") and addr[0] != self.udp_ip:
-                    continue
+                    # Ignore anything that did not come from the LightBurn host.
+                    if self.udp_ip not in ("0.0.0.0", "") and addr[0] != self.udp_ip:
+                        continue
 
-                return data.decode("utf-8", errors="replace").strip("\x00").strip()
+                    return data.decode("utf-8", errors="replace").strip("\x00").strip()
 
-        except OSError as exc:
-            print(f"Error in UDP communication: {exc}")
-            return False
-        finally:
-            if out_sock is not None:
-                out_sock.close()
+            except PortInUseError:
+                raise
+            except OSError as exc:
+                print(f"Error in UDP communication: {exc}")
+                return False
+            finally:
+                if out_sock is not None:
+                    out_sock.close()
 
     def close(self):
         """Release the bound receive socket."""
@@ -448,6 +529,45 @@ class LightBurnUDPCommunication:
     # Process management
     # ------------------------------------------------------------------ #
 
+    def _proc_pids(self):
+        """
+        PIDs whose /proc/<pid>/exe belongs to this LightBurn installation.
+
+        Reading the exec target rather than matching the command line fixes two
+        opposite failures of `pgrep -f <basename>`: it no longer matches an
+        unrelated process that merely mentions the path (a diagnostic script
+        invoked with --path .../AppRun matched itself), and it still finds
+        LightBurn after an AppRun stub execs usr/bin/LightBurn, at which point
+        the string "AppRun" is gone from the command line entirely.
+
+        Returns:
+            list[int]: Matching PIDs, empty if none or if /proc is unavailable.
+        """
+        target = os.path.realpath(self.lightburn_path)
+        # For an extracted AppImage the stub and the real binary live in the
+        # same tree, so match on the tree rather than the exact file.
+        root = os.path.dirname(target)
+        appdir = os.path.dirname(root) if os.path.basename(root) == "bin" else root
+
+        pids = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return pids
+
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                exe = os.path.realpath(os.readlink(f"/proc/{entry}/exe"))
+            except OSError:
+                # Vanished between listdir and readlink, or owned by another
+                # user — neither is an error worth reporting.
+                continue
+            if exe == target or exe.startswith(appdir + os.sep):
+                pids.append(int(entry))
+        return pids
+
     def is_process_running(self):
         """
         Check whether a LightBurn process exists, regardless of UDP state.
@@ -458,6 +578,9 @@ class LightBurnUDPCommunication:
         Returns:
             bool: True if a matching process was found.
         """
+        if not _IS_WINDOWS and not _IS_MACOS and os.path.isdir("/proc"):
+            return bool(self._proc_pids())
+
         name = os.path.basename(self.lightburn_path)
         try:
             if _IS_WINDOWS:
@@ -493,17 +616,49 @@ class LightBurnUDPCommunication:
             # only exists on Windows.
             return False
 
-    def start_lightburn(self):
+    def _open_launch_log(self):
+        """
+        Open a file to capture the launched process's output.
+
+        Sending stdout and stderr to DEVNULL makes a refusal to start
+        indistinguishable from a slow start: the process is simply gone, with
+        no missing-library or no-display message anywhere. Falls back to
+        DEVNULL only if the log file itself cannot be opened.
+
+        Returns:
+            file object: An open file, or subprocess.DEVNULL as a fallback.
+        """
+        try:
+            path = os.path.join(
+                tempfile.gettempdir(),
+                f"lightburn_launch_{os.getpid()}.log",
+            )
+            handle = open(path, "ab", buffering=0)
+            handle.write(
+                f"\n--- launch at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode()
+            )
+            self.launch_log_path = path
+            return handle
+        except OSError:
+            self.launch_log_path = None
+            return subprocess.DEVNULL
+
+    def start_lightburn(self, extra_args=None):
         """
         Start the LightBurn application, detached from this process.
+
+        Args:
+            extra_args (list[str] or None): Additional command-line arguments,
+                e.g. ["--prefsdir", "/home/me/.config/LightBurn"].
 
         Returns:
             bool: True if the process was launched, False otherwise.
         """
+        log = self._open_launch_log()
         kwargs = {
             "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stdout": log,
+            "stderr": subprocess.STDOUT,
             "cwd": os.path.dirname(self.lightburn_path) or None,
         }
 
@@ -516,9 +671,13 @@ class LightBurnUDPCommunication:
         else:
             kwargs["start_new_session"] = True
 
+        cmd = [self.lightburn_path] + [str(a) for a in (extra_args or [])]
+
         try:
-            subprocess.Popen([self.lightburn_path], **kwargs)
+            subprocess.Popen(cmd, **kwargs)
             print(f"Started LightBurn from: {self.lightburn_path}")
+            if self.launch_log_path:
+                print(f"Launch output is being written to: {self.launch_log_path}")
             return True
         except OSError as exc:
             print(f"Error starting LightBurn: {exc}")
@@ -538,16 +697,27 @@ class LightBurnUDPCommunication:
                     "application and needs a graphical session."
                 )
             return False
+        finally:
+            # The child holds its own duplicate of the descriptor; keeping the
+            # parent's copy open would leak one per launch.
+            if log is not subprocess.DEVNULL:
+                try:
+                    log.close()
+                except OSError:
+                    pass
 
-    def ensure_lightburn_running(self, startup_timeout=10.0, poll_interval=1.0):
+    def ensure_lightburn_running(
+        self, startup_timeout=30.0, poll_interval=1.0, extra_args=None
+    ):
         """
         Ensure LightBurn is running and responding to PING, starting it if not.
 
         Args:
-            startup_timeout (float): Max seconds to wait (default 10.0). First
-                launch is often slower than this on modest hardware; 30 or more
-                is a safer value when autostarting.
+            startup_timeout (float): Max seconds to wait (default 30.0). A cold
+                first launch on modest hardware regularly exceeds ten seconds,
+                which is why that is no longer the default.
             poll_interval (float): Seconds between pings (default 1.0)
+            extra_args (list[str] or None): Extra arguments for the launch.
 
         Returns:
             bool: True if LightBurn is responding.
@@ -556,14 +726,15 @@ class LightBurnUDPCommunication:
             print("LightBurn is already running and responding")
             return True
 
-        if self.is_process_running():
+        was_already_running = self.is_process_running()
+        if was_already_running:
             print(
                 "A LightBurn process exists but is not answering on UDP. "
                 "Waiting rather than launching a second copy..."
             )
         else:
             print("LightBurn not responding, attempting to start...")
-            if not self.start_lightburn():
+            if not self.start_lightburn(extra_args=extra_args):
                 return False
 
         deadline = time.monotonic() + startup_timeout
@@ -575,6 +746,29 @@ class LightBurnUDPCommunication:
                 return True
 
         print(f"Timeout: LightBurn did not respond within {startup_timeout} seconds")
+
+        # A process that is alive but silent for the whole window is a
+        # different failure from one that never started, and the usual cause is
+        # a modal dialog — unsaved-changes, file recovery, licence or update
+        # prompt — which blocks the UI thread that services UDP. Nothing here
+        # can clear it, but saying so beats reporting a bare timeout.
+        if self.is_process_running():
+            print(
+                "A LightBurn process is still running but never answered. It is "
+                "most likely blocked on a modal dialog (unsaved changes, file "
+                "recovery, licence or update prompt). Check the screen — the "
+                "dialog may be hidden behind another window — or use "
+                "load_file(..., force=True) to avoid the save prompt."
+            )
+        elif not was_already_running:
+            print(
+                "The launched process is no longer running. "
+                + (
+                    f"See {self.launch_log_path} for its output."
+                    if self.launch_log_path
+                    else "No launch log was captured."
+                )
+            )
         return False
 
     # ------------------------------------------------------------------ #
