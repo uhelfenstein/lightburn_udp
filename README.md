@@ -28,6 +28,12 @@ Or from a checkout:
 pip install .
 ```
 
+Or directly from GitHub:
+
+```bash
+pip install git+https://github.com/uhelfenstein/lightburn_udp.git
+```
+
 Requires Python 3.8+.
 
 ## Quick Start

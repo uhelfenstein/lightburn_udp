@@ -4,16 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1995c017-d080-4ded-9ca6-d6afaeea5846" name="Changes" comment="Initial commit">
-      <change afterPath="$PROJECT_DIR$/lightburn_udp/__main__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/test_lightburn_udp.py" afterDir="false" />
+    <list default="true" id="1995c017-d080-4ded-9ca6-d6afaeea5846" name="Changes" comment="FIX import bug&#10;Port to Linux">
       <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/LICENSE" beforeDir="false" afterPath="$PROJECT_DIR$/LICENSE" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/lightburn_udp/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/lightburn_udp/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/lightburn_udp/lightburn_udp.py" beforeDir="false" afterPath="$PROJECT_DIR$/lightburn_udp/lightburn_udp.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -135,11 +127,20 @@
       <option name="project" value="LOCAL" />
       <updated>1754602225567</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="FIX import bug&#10;Port to Linux">
+      <option name="closed" value="true" />
+      <created>1786718231771</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1786718231772</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Initial commit" />
-    <option name="LAST_COMMIT_MESSAGE" value="Initial commit" />
+    <MESSAGE value="FIX import bug&#10;Port to Linux" />
+    <option name="LAST_COMMIT_MESSAGE" value="FIX import bug&#10;Port to Linux" />
   </component>
 </project>
