@@ -182,6 +182,55 @@ class PortInUseError(OSError):
     """
 
 
+#: Environment variables removed from the child's environment before launching.
+#: LightBurn bundles its own Qt, but a Python process that has imported a
+#: Qt-linked wheel — opencv-python is the usual culprit — exports
+#: QT_QPA_PLATFORM_PLUGIN_PATH pointing inside site-packages. The child inherits
+#: it, tries to load a foreign platform plugin built against a different Qt, and
+#: exits before showing a window: "Could not load the Qt platform plugin xcb ...
+#: even though it was found". Every QT_* variable is dropped for the same
+#: reason, along with the loader and Python variables a venv may have set.
+_ENV_STRIP_PREFIXES = ("QT_",)
+_ENV_STRIP_NAMES = (
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONEXECUTABLE",
+)
+
+
+def _child_env(strip=True):
+    """
+    Build the environment for the launched process.
+
+    Args:
+        strip (bool): Remove variables known to break a foreign Qt application.
+            Pass False to hand the process an unmodified environment.
+
+    Returns:
+        dict or None: The environment, or None to inherit unchanged.
+    """
+    if not strip:
+        return None
+
+    env = dict(os.environ)
+    removed = [
+        name
+        for name in list(env)
+        if name.startswith(_ENV_STRIP_PREFIXES) or name in _ENV_STRIP_NAMES
+    ]
+    for name in removed:
+        del env[name]
+    if removed:
+        print(
+            "Removed from LightBurn's environment (would point it at this "
+            f"process's libraries): {', '.join(sorted(removed))}"
+        )
+    return env
+
+
 def _port_check_hint(port):
     """Platform-appropriate command for finding what holds a UDP port."""
     if _IS_WINDOWS:
@@ -540,14 +589,25 @@ class LightBurnUDPCommunication:
         LightBurn after an AppRun stub execs usr/bin/LightBurn, at which point
         the string "AppRun" is gone from the command line entirely.
 
+        A process matches if its executable is the configured file, lives inside
+        the same extracted AppImage, or is simply named LightBurn. The tree test
+        is anchored on the AppRun stub and never on a parent of the executable:
+        deriving the root by stepping out of "bin" turns /usr/bin/LightBurn into
+        /usr, which matches the Python interpreter and reports LightBurn running
+        on any machine at all.
+
         Returns:
             list[int]: Matching PIDs, empty if none or if /proc is unavailable.
         """
         target = os.path.realpath(self.lightburn_path)
-        # For an extracted AppImage the stub and the real binary live in the
-        # same tree, so match on the tree rather than the exact file.
-        root = os.path.dirname(target)
-        appdir = os.path.dirname(root) if os.path.basename(root) == "bin" else root
+
+        # Only an AppRun stub identifies a self-contained application tree.
+        appdir = (
+            os.path.dirname(target)
+            if os.path.basename(target) == _APPDIR_ENTRY
+            else None
+        )
+        names = {name.lower() for name in _EXE_NAMES}
 
         pids = []
         try:
@@ -564,7 +624,11 @@ class LightBurnUDPCommunication:
                 # Vanished between listdir and readlink, or owned by another
                 # user — neither is an error worth reporting.
                 continue
-            if exe == target or exe.startswith(appdir + os.sep):
+            if (
+                exe == target
+                or (appdir and exe.startswith(appdir + os.sep))
+                or os.path.basename(exe).lower() in names
+            ):
                 pids.append(int(entry))
         return pids
 
@@ -643,13 +707,15 @@ class LightBurnUDPCommunication:
             self.launch_log_path = None
             return subprocess.DEVNULL
 
-    def start_lightburn(self, extra_args=None):
+    def start_lightburn(self, extra_args=None, clean_env=True):
         """
         Start the LightBurn application, detached from this process.
 
         Args:
             extra_args (list[str] or None): Additional command-line arguments,
                 e.g. ["--prefsdir", "/home/me/.config/LightBurn"].
+            clean_env (bool): Strip variables that would point LightBurn at this
+                process's own libraries (default True). See _ENV_STRIP_PREFIXES.
 
         Returns:
             bool: True if the process was launched, False otherwise.
@@ -660,6 +726,7 @@ class LightBurnUDPCommunication:
             "stdout": log,
             "stderr": subprocess.STDOUT,
             "cwd": os.path.dirname(self.lightburn_path) or None,
+            "env": _child_env(clean_env),
         }
 
         if _IS_WINDOWS:
@@ -707,7 +774,7 @@ class LightBurnUDPCommunication:
                     pass
 
     def ensure_lightburn_running(
-        self, startup_timeout=30.0, poll_interval=1.0, extra_args=None
+        self, startup_timeout=30.0, poll_interval=1.0, extra_args=None, clean_env=True
     ):
         """
         Ensure LightBurn is running and responding to PING, starting it if not.
@@ -718,6 +785,8 @@ class LightBurnUDPCommunication:
                 which is why that is no longer the default.
             poll_interval (float): Seconds between pings (default 1.0)
             extra_args (list[str] or None): Extra arguments for the launch.
+            clean_env (bool): Strip environment variables that would point
+                LightBurn at this process's libraries (default True).
 
         Returns:
             bool: True if LightBurn is responding.
@@ -734,7 +803,7 @@ class LightBurnUDPCommunication:
             )
         else:
             print("LightBurn not responding, attempting to start...")
-            if not self.start_lightburn(extra_args=extra_args):
+            if not self.start_lightburn(extra_args=extra_args, clean_env=clean_env):
                 return False
 
         deadline = time.monotonic() + startup_timeout
