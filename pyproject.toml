@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lightburn-udp"
-version = "1.0.0"
+dynamic = ["version"]
 description = "UDP communication with LightBurn software"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "Urs Helfenstein", email = "uhelfenstein@users.noreply.github.com"}
@@ -21,30 +21,34 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Hardware",
 ]
 dependencies = []
 
+[project.scripts]
+lightburn-udp = "lightburn_udp.__main__:main"
+
 [project.optional-dependencies]
-dev = [
-    "pytest>=6.0",
-    "pytest-cov",
-    "black",
-    "flake8",
-]
+dev = ["pytest>=6.0", "pytest-cov", "black", "flake8"]
 
 [project.urls]
-Homepage = "https://github.com/uhelfenstein/lightburn-udp"
-Documentation = "https://github.com/uhelfenstein/lightburn-udp#readme"
-Repository = "https://github.com/uhelfenstein/lightburn-udp"
-"Bug Tracker" = "https://github.com/uhelfenstein/lightburn-udp/issues"
+Homepage = "https://github.com/uhelfenstein/lightburn_udp"
+Documentation = "https://github.com/uhelfenstein/lightburn_udp#readme"
+Repository = "https://github.com/uhelfenstein/lightburn_udp"
+"Bug Tracker" = "https://github.com/uhelfenstein/lightburn_udp/issues"
+
+[tool.setuptools.dynamic]
+version = {attr = "lightburn_udp.lightburn_udp.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]

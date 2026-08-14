@@ -1,11 +1,14 @@
 """
 LightBurn UDP Communication Package
 
-This package provides UDP communication capabilities with LightBurn software.
+Provides UDP communication with LightBurn software on Windows, macOS and Linux.
 """
 
-from lightburn_udp import LightBurnUDPCommunication
+from .lightburn_udp import (
+    LightBurnUDPCommunication,
+    find_lightburn,
+    __version__,
+    __author__,
+)
 
-__version__ = "1.0.0"
-__author__ = "Urs Helfenstein"
-__all__ = ['LightBurnUDPCommunication']
+__all__ = ["LightBurnUDPCommunication", "find_lightburn", "__version__"]
