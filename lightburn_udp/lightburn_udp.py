@@ -266,6 +266,7 @@ class LightBurnUDPCommunication:
         udp_out_port=19840,
         udp_in_port=19841,
         bind_ip=None,
+        remote=False,
     ):
         """
         Initialize the LightBurn UDP communication handler.
@@ -280,18 +281,21 @@ class LightBurnUDPCommunication:
             bind_ip (str or None): Local address to bind the receive socket to.
                 Defaults to udp_ip for loopback, or "0.0.0.0" when talking to a
                 LightBurn on another host.
+            remote (bool): True if instance is only located on a remote machine.
+                Explicit path on remote machine is required. (defaut False)
 
         Raises:
             FileNotFoundError: If the executable cannot be found.
             PermissionError: If the file exists but is not executable (POSIX).
         """
-        self.lightburn_path = self._resolve_executable(lightburn_path)
+        self.lightburn_path = self._resolve_executable(lightburn_path) if not remote else lightburn_path
         self.udp_ip = udp_ip
         self.udp_out_port = int(udp_out_port)
         self.udp_in_port = int(udp_in_port)
         self.bind_ip = bind_ip if bind_ip is not None else (
             udp_ip if _is_loopback(udp_ip) else "0.0.0.0"
         )
+        self.remote = remote
         self._in_sock = None
         # One socket is shared by every command, and each command drains it
         # first. Two threads overlapping would let one discard the other's
@@ -554,7 +558,7 @@ class LightBurnUDPCommunication:
         Returns:
             str or False: The response, or False on timeout or error.
         """
-        resolved = _expand(file_path)
+        resolved = _expand(file_path) if not self.remote else file_path
         if not os.path.exists(resolved):
             print(f"Warning: file does not exist locally: {resolved}")
 
@@ -803,8 +807,13 @@ class LightBurnUDPCommunication:
             )
         else:
             print("LightBurn not responding, attempting to start...")
+            if self.remote:
+                print("Unable to start remote instance. Please manually start lighroom on the target machine")
+                return False
+
             if not self.start_lightburn(extra_args=extra_args, clean_env=clean_env):
                 return False
+                
 
         deadline = time.monotonic() + startup_timeout
         while time.monotonic() < deadline:
