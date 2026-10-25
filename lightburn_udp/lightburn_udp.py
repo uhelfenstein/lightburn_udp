@@ -646,7 +646,7 @@ class LightBurnUDPCommunication:
         Returns:
             bool: True if a matching process was found.
         """
-        if not _IS_WINDOWS and not _IS_MACOS and os.path.isdir("/proc"):
+        if not _IS_WINDOWS and not _IS_MACOS and not self.remote and os.path.isdir("/proc"):
             return bool(self._proc_pids())
 
         name = os.path.basename(self.lightburn_path)
